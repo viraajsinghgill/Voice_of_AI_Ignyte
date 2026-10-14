@@ -1,20 +1,17 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { FraudIncident, CallStep, ConversationTurn, LanguageCode } from "@/types/fraud";
 import {
   PhoneCall,
   PhoneOff,
   Mic,
+  MicOff,
   Volume2,
   VolumeX,
-  ShieldAlert,
-  UserCheck,
   Lock,
-  Headphones,
   CheckCircle2,
-  AlertCircle,
-  Globe,
+  Sparkles,
 } from "lucide-react";
 
 interface VoiceAgentLiveProps {
@@ -49,23 +46,166 @@ export const VoiceAgentLive: React.FC<VoiceAgentLiveProps> = ({
 }) => {
   const [isMuted, setIsMuted] = useState(false);
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
+  const [isListeningMic, setIsListeningMic] = useState(false);
+  const [audioSourceType, setAudioSourceType] = useState<string>("ElevenLabs Eleven v3 / Turbo");
 
-  // Play audio voice synthesis for the latest agent utterance
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  const recognitionRef = useRef<any>(null);
+
+  // Stop audio on call end
+  useEffect(() => {
+    if (!isCallActive && currentAudioRef.current) {
+      currentAudioRef.current.pause();
+      currentAudioRef.current = null;
+      setIsPlayingAudio(false);
+    }
+  }, [isCallActive]);
+
+  // Real ElevenLabs MP3 Audio Streaming for every agent utterance
   useEffect(() => {
     if (turns.length === 0 || isMuted || !isCallActive) return;
     const lastTurn = turns[turns.length - 1];
-    if (lastTurn.speaker === "agent" && typeof window !== "undefined" && "speechSynthesis" in window) {
-      window.speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(language === "ar" && lastTurn.textAr ? lastTurn.textAr : lastTurn.text);
-      utterance.lang = language === "ar" ? "ar-AE" : "en-US";
-      utterance.rate = 1.05;
-      utterance.pitch = 1.0;
-      utterance.onstart = () => setIsPlayingAudio(true);
-      utterance.onend = () => setIsPlayingAudio(false);
-      utterance.onerror = () => setIsPlayingAudio(false);
-      window.speechSynthesis.speak(utterance);
+
+    if (lastTurn.speaker === "agent") {
+      const textToSpeak = language === "ar" && lastTurn.textAr ? lastTurn.textAr : lastTurn.text;
+
+      // Stop any prior audio
+      if (currentAudioRef.current) {
+        currentAudioRef.current.pause();
+        currentAudioRef.current = null;
+      }
+
+      setIsPlayingAudio(true);
+
+      // Call our ElevenLabs endpoint with active grant key
+      fetch("/api/elevenlabs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: textToSpeak,
+          language,
+        }),
+      })
+        .then(async (res) => {
+          if (!res.ok) throw new Error("ElevenLabs API stream failed");
+
+          const contentType = res.headers.get("content-type");
+
+          if (contentType && contentType.includes("audio")) {
+            // Real MP3 audio from ElevenLabs!
+            setAudioSourceType("ElevenLabs Live Grant Stream");
+            const blob = await res.blob();
+            const audioUrl = URL.createObjectURL(blob);
+            const audio = new Audio(audioUrl);
+            currentAudioRef.current = audio;
+
+            audio.onplay = () => setIsPlayingAudio(true);
+            audio.onended = () => {
+              setIsPlayingAudio(false);
+              URL.revokeObjectURL(audioUrl);
+            };
+            audio.onerror = () => fallbackWebSpeech(textToSpeak);
+
+            audio.play().catch(() => fallbackWebSpeech(textToSpeak));
+          } else {
+            // Fallback to Web Speech API
+            fallbackWebSpeech(textToSpeak);
+          }
+        })
+        .catch(() => {
+          fallbackWebSpeech(textToSpeak);
+        });
+    }
+
+    function fallbackWebSpeech(text: string) {
+      if (typeof window !== "undefined" && "speechSynthesis" in window) {
+        setAudioSourceType("Web Speech Synthesis (Fallback)");
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = language === "ar" ? "ar-AE" : "en-US";
+        utterance.rate = 1.05;
+        utterance.onstart = () => setIsPlayingAudio(true);
+        utterance.onend = () => setIsPlayingAudio(false);
+        utterance.onerror = () => setIsPlayingAudio(false);
+        window.speechSynthesis.speak(utterance);
+      }
     }
   }, [turns, isMuted, isCallActive, language]);
+
+  // Live Microphone Input (Real Customer Speech-to-Text)
+  const toggleMicrophone = () => {
+    if (!isCallActive) return;
+
+    if (isListeningMic) {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+      setIsListeningMic(false);
+      return;
+    }
+
+    if (typeof window !== "undefined") {
+      const SpeechRecognition =
+        (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+      if (!SpeechRecognition) {
+        alert("Speech recognition is not supported in this browser. Please use the response buttons below.");
+        return;
+      }
+
+      try {
+        const recognition = new SpeechRecognition();
+        recognition.lang = language === "ar" ? "ar-AE" : "en-US";
+        recognition.continuous = false;
+        recognition.interimResults = false;
+
+        recognition.onstart = () => setIsListeningMic(true);
+        recognition.onend = () => setIsListeningMic(false);
+        recognition.onerror = () => setIsListeningMic(false);
+
+        recognition.onresult = (event: any) => {
+          const spokenText = event.results[0][0].transcript.toLowerCase();
+          console.log("Customer Spoke:", spokenText);
+
+          // Intent classification
+          if (
+            spokenText.includes("freeze") ||
+            spokenText.includes("no") ||
+            spokenText.includes("wasn't me") ||
+            spokenText.includes("stop") ||
+            spokenText.includes("fraud") ||
+            spokenText.includes("لا") ||
+            spokenText.includes("وقف")
+          ) {
+            onCustomerResponse(spokenText, "fraud");
+          } else if (
+            spokenText.includes("yes") ||
+            spokenText.includes("authorized") ||
+            spokenText.includes("i did") ||
+            spokenText.includes("أيوه") ||
+            spokenText.includes("نعم")
+          ) {
+            onCustomerResponse(spokenText, "legitimate");
+          } else if (
+            spokenText.includes("human") ||
+            spokenText.includes("agent") ||
+            spokenText.includes("person") ||
+            spokenText.includes("موظف")
+          ) {
+            onCustomerResponse(spokenText, "human");
+          } else {
+            onCustomerResponse(spokenText, "fraud");
+          }
+        };
+
+        recognitionRef.current = recognition;
+        recognition.start();
+      } catch (err) {
+        console.error("Speech recognition error:", err);
+        setIsListeningMic(false);
+      }
+    }
+  };
 
   const steps: CallStep[] = [
     {
@@ -246,12 +386,9 @@ export const VoiceAgentLive: React.FC<VoiceAgentLiveProps> = ({
                   />
                 ))}
               </div>
-              <span className="text-xs font-semibold text-slate-300">
-                {isPlayingAudio && isCallActive
-                  ? "Eleven v3 Voice Synthesizing..."
-                  : isCallActive
-                  ? "Scribe v2 STT Listening..."
-                  : "Audio Channel Ready"}
+              <span className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+                <span>{audioSourceType}</span>
               </span>
             </div>
             <span className="text-[11px] font-mono text-emerald-400 bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-800/40">
@@ -300,12 +437,37 @@ export const VoiceAgentLive: React.FC<VoiceAgentLiveProps> = ({
             )}
           </div>
 
-          {/* Customer Response Interactive Control Bar */}
+          {/* Customer Voice Mic & Response Interactive Control Bar */}
           {isCallActive && (
-            <div className="mt-3 pt-3 border-t border-slate-800">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-2">
-                Simulate Customer Spoken Utterance (Voice / Speech-to-Text):
-              </span>
+            <div className="mt-3 pt-3 border-t border-slate-800 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                  Respond via Microphone or Quick Actions:
+                </span>
+                {/* Live Mic Button */}
+                <button
+                  onClick={toggleMicrophone}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold transition ${
+                    isListeningMic
+                      ? "bg-red-500 text-white animate-pulse shadow-md shadow-red-950"
+                      : "bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700"
+                  }`}
+                >
+                  {isListeningMic ? (
+                    <>
+                      <MicOff className="w-3.5 h-3.5" />
+                      <span>Listening... Speak Now</span>
+                    </>
+                  ) : (
+                    <>
+                      <Mic className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>Speak via Mic (STT)</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {/* Quick Action Buttons */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 <button
                   disabled={!isPushApproved || isCardFrozen}

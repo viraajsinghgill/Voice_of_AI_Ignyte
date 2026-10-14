@@ -1,7 +1,7 @@
 "use client";
 
-import React from "react";
-import { ShieldCheck, PhoneCall, Radio, FileText, CheckCircle2 } from "lucide-react";
+import React, { useEffect, useState } from "react";
+import { ShieldCheck, Sparkles, Radio, FileText, CheckCircle2, Zap } from "lucide-react";
 
 interface HeaderProps {
   onOpenAudit: () => void;
@@ -9,6 +9,29 @@ interface HeaderProps {
 }
 
 export const Header: React.FC<HeaderProps> = ({ onOpenAudit, onOpenCanvas }) => {
+  const [grantInfo, setGrantInfo] = useState<{
+    tier: string;
+    characterLimit: number;
+    characterCount: number;
+    agentId?: string;
+  } | null>(null);
+
+  useEffect(() => {
+    fetch("/api/elevenlabs")
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.configured) {
+          setGrantInfo({
+            tier: data.tier,
+            characterLimit: data.characterLimit,
+            characterCount: data.characterCount,
+            agentId: data.agentId,
+          });
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   return (
     <header className="border-b border-slate-800 bg-[#0b1120]/90 backdrop-blur-md sticky top-0 z-40 px-4 lg:px-8 py-3.5">
       <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
@@ -42,14 +65,19 @@ export const Header: React.FC<HeaderProps> = ({ onOpenAudit, onOpenCanvas }) => 
 
         {/* Live Status Gauges & Actions */}
         <div className="flex flex-wrap items-center gap-2.5 sm:gap-3 text-xs">
-          {/* CBUAE Guardrail Badge */}
-          <div className="hidden lg:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-300">
-            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-            <span>Zero-Knowledge Challenge</span>
+          {/* ElevenLabs Grant Tier Live Telemetry */}
+          <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-emerald-950/40 border border-emerald-500/40 text-emerald-300 shadow-sm">
+            <Sparkles className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+            <span className="font-semibold">
+              ElevenLabs Grant:{" "}
+              <strong className="text-white font-mono">
+                {grantInfo ? `${(grantInfo.characterLimit / 1000000).toFixed(1)}M Chars` : "33.0M Chars"}
+              </strong>
+            </span>
           </div>
 
           {/* ElevenLabs Scribe v2 Badge */}
-          <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-300">
+          <div className="hidden lg:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-300">
             <Radio className="w-3.5 h-3.5 text-teal-400 animate-pulse" />
             <span>Scribe v2 STT (<span className="text-emerald-400 font-mono">150ms</span>)</span>
           </div>
