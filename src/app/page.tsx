@@ -91,7 +91,8 @@ export default function Home() {
     setTurns([turn1]);
     addAuditLog("MANDATORY_AI_DISCLOSURE_UTTERED", "Sentinel_Agent", "Opening disclosure executed prior to audio collection.");
 
-    // Step 2: Zero-Knowledge Biometric Push Challenge
+    // Step 2: Zero-Knowledge Biometric Push Challenge (paced to allow Step 1 audio to complete)
+    const step2Delay = language === "ar" ? 6400 : 4600;
     setTimeout(() => {
       setCurrentStepIndex(1);
       setIsPushActive(true);
@@ -110,7 +111,7 @@ export default function Home() {
 
       setTurns((prev) => [...prev, turn2]);
       addAuditLog("TOOL_TRIGGER_IN_APP_CHALLENGE", "Sentinel_Agent", "Zero-Knowledge Biometric Push Challenge dispatched to mobile app.");
-    }, 2800);
+    }, step2Delay);
   };
 
   // User completes biometric push approval on simulated mobile phone

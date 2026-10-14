@@ -47,40 +47,70 @@ export const VoiceAgentLive: React.FC<VoiceAgentLiveProps> = ({
   const [isMuted, setIsMuted] = useState(false);
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
   const [isListeningMic, setIsListeningMic] = useState(false);
-  const [audioSourceType, setAudioSourceType] = useState<string>("ElevenLabs Eleven v3 / Turbo");
+  const [audioSourceType, setAudioSourceType] = useState<string>("ElevenLabs Live Audio");
 
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
   const recognitionRef = useRef<any>(null);
+  const lastSpokenTurnIdRef = useRef<string | null>(null);
+  const activeFetchAbortRef = useRef<AbortController | null>(null);
+
+  // Helper to completely stop ALL audio output immediately
+  const stopAllAudio = () => {
+    if (activeFetchAbortRef.current) {
+      activeFetchAbortRef.current.abort();
+      activeFetchAbortRef.current = null;
+    }
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause();
+      currentAudioRef.current.src = "";
+      currentAudioRef.current.load();
+      currentAudioRef.current = null;
+    }
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+    setIsPlayingAudio(false);
+  };
 
   // Stop audio on call end
   useEffect(() => {
-    if (!isCallActive && currentAudioRef.current) {
-      currentAudioRef.current.pause();
-      currentAudioRef.current = null;
-      setIsPlayingAudio(false);
+    if (!isCallActive) {
+      stopAllAudio();
+      lastSpokenTurnIdRef.current = null;
     }
   }, [isCallActive]);
 
-  // Real ElevenLabs MP3 Audio Streaming for every agent utterance
+  // Real ElevenLabs MP3 Audio Streaming with strict single-channel execution
   useEffect(() => {
-    if (turns.length === 0 || isMuted || !isCallActive) return;
+    if (turns.length === 0 || isMuted || !isCallActive) {
+      stopAllAudio();
+      return;
+    }
+
     const lastTurn = turns[turns.length - 1];
 
+    // Only play if it's an agent turn AND it hasn't been spoken yet
     if (lastTurn.speaker === "agent") {
-      const textToSpeak = language === "ar" && lastTurn.textAr ? lastTurn.textAr : lastTurn.text;
-
-      // Stop any prior audio
-      if (currentAudioRef.current) {
-        currentAudioRef.current.pause();
-        currentAudioRef.current = null;
+      if (lastSpokenTurnIdRef.current === lastTurn.id) {
+        return; // Prevent duplicate playback on re-renders
       }
+
+      lastSpokenTurnIdRef.current = lastTurn.id;
+
+      // Stop any previously playing audio or speech synthesis immediately
+      stopAllAudio();
+
+      const textToSpeak = language === "ar" && lastTurn.textAr ? lastTurn.textAr : lastTurn.text;
+      const abortController = new AbortController();
+      activeFetchAbortRef.current = abortController;
 
       setIsPlayingAudio(true);
 
-      // Call our ElevenLabs endpoint with active grant key
+      // Call ElevenLabs endpoint
       fetch("/api/elevenlabs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: abortController.signal,
         body: JSON.stringify({
           text: textToSpeak,
           language,
@@ -92,9 +122,13 @@ export const VoiceAgentLive: React.FC<VoiceAgentLiveProps> = ({
           const contentType = res.headers.get("content-type");
 
           if (contentType && contentType.includes("audio")) {
-            // Real MP3 audio from ElevenLabs!
-            setAudioSourceType("ElevenLabs Live Grant Stream");
+            // Real MP3 audio from ElevenLabs
+            setAudioSourceType("ElevenLabs Live Stream");
             const blob = await res.blob();
+
+            // Check if another turn took over while fetching
+            if (abortController.signal.aborted) return;
+
             const audioUrl = URL.createObjectURL(blob);
             const audio = new Audio(audioUrl);
             currentAudioRef.current = audio;
@@ -103,27 +137,36 @@ export const VoiceAgentLive: React.FC<VoiceAgentLiveProps> = ({
             audio.onended = () => {
               setIsPlayingAudio(false);
               URL.revokeObjectURL(audioUrl);
+              currentAudioRef.current = null;
             };
-            audio.onerror = () => fallbackWebSpeech(textToSpeak);
+            audio.onerror = () => {
+              setIsPlayingAudio(false);
+              URL.revokeObjectURL(audioUrl);
+            };
 
-            audio.play().catch(() => fallbackWebSpeech(textToSpeak));
+            audio.play().catch((err) => {
+              console.warn("Audio autoplay blocked or interrupted:", err);
+              setIsPlayingAudio(false);
+            });
           } else {
-            // Fallback to Web Speech API
+            // Only use fallback speech synthesis if NO audio returned
             fallbackWebSpeech(textToSpeak);
           }
         })
-        .catch(() => {
-          fallbackWebSpeech(textToSpeak);
+        .catch((err) => {
+          if (err.name !== "AbortError") {
+            fallbackWebSpeech(textToSpeak);
+          }
         });
     }
 
     function fallbackWebSpeech(text: string) {
       if (typeof window !== "undefined" && "speechSynthesis" in window) {
-        setAudioSourceType("Web Speech Synthesis (Fallback)");
+        setAudioSourceType("Web Speech (Fallback)");
         window.speechSynthesis.cancel();
         const utterance = new SpeechSynthesisUtterance(text);
         utterance.lang = language === "ar" ? "ar-AE" : "en-US";
-        utterance.rate = 1.05;
+        utterance.rate = 1.0;
         utterance.onstart = () => setIsPlayingAudio(true);
         utterance.onend = () => setIsPlayingAudio(false);
         utterance.onerror = () => setIsPlayingAudio(false);
@@ -165,7 +208,6 @@ export const VoiceAgentLive: React.FC<VoiceAgentLiveProps> = ({
 
         recognition.onresult = (event: any) => {
           const spokenText = event.results[0][0].transcript.toLowerCase();
-          console.log("Customer Spoke:", spokenText);
 
           // Intent classification
           if (
@@ -279,7 +321,10 @@ export const VoiceAgentLive: React.FC<VoiceAgentLiveProps> = ({
           {/* Language Switch */}
           <div className="flex items-center p-0.5 rounded-lg bg-slate-900 border border-slate-800 text-xs font-semibold">
             <button
-              onClick={() => onToggleLanguage("en")}
+              onClick={() => {
+                stopAllAudio();
+                onToggleLanguage("en");
+              }}
               className={`px-2.5 py-1 rounded-md transition ${
                 language === "en" ? "bg-emerald-600 text-white" : "text-slate-400 hover:text-white"
               }`}
@@ -287,7 +332,10 @@ export const VoiceAgentLive: React.FC<VoiceAgentLiveProps> = ({
               English
             </button>
             <button
-              onClick={() => onToggleLanguage("ar")}
+              onClick={() => {
+                stopAllAudio();
+                onToggleLanguage("ar");
+              }}
               className={`px-2.5 py-1 rounded-md transition ${
                 language === "ar" ? "bg-emerald-600 text-white" : "text-slate-400 hover:text-white"
               }`}
@@ -298,7 +346,10 @@ export const VoiceAgentLive: React.FC<VoiceAgentLiveProps> = ({
 
           {/* Mute Voice Audio */}
           <button
-            onClick={() => setIsMuted(!isMuted)}
+            onClick={() => {
+              if (!isMuted) stopAllAudio();
+              setIsMuted(!isMuted);
+            }}
             className={`p-2 rounded-lg border text-xs transition ${
               isMuted
                 ? "bg-red-500/10 border-red-500/30 text-red-400"
@@ -312,7 +363,10 @@ export const VoiceAgentLive: React.FC<VoiceAgentLiveProps> = ({
           {/* End Call Button */}
           {isCallActive && (
             <button
-              onClick={onEndCall}
+              onClick={() => {
+                stopAllAudio();
+                onEndCall();
+              }}
               className="p-2 rounded-lg bg-red-600/80 hover:bg-red-600 text-white transition"
               title="Terminate Call"
             >
